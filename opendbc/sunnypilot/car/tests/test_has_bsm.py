@@ -8,7 +8,8 @@ import unittest
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.car_helpers import interfaces
-from opendbc.sunnypilot.car.interfaces import has_bsm
+from opendbc.sunnypilot.car.interfaces import has_bsm, setup_interfaces
+from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP, ToyotaSafetyFlagsSP
 from opendbc.testing import parameterized
 
 
@@ -25,3 +26,58 @@ class TestHasBsm(unittest.TestCase):
       CP = CarInterface.get_params(car_name, fingerprint, [], False, False, False)
       CP_SP = CarInterface.get_params_sp(CP, car_name, fingerprint, [], False, False, False)
       self.assertEqual(has_bsm(CP, CP_SP), present or addr is None)
+
+  def test_has_bsm_enhanced_toyota(self):
+    # 0x3F6 is status-only on TSS-P, so gate on the platform and OR with stock BSM in CarStateExt.
+    # Prius TSS2 has openpilot long by default; C-HR TSS2 radar ACC needs alpha long.
+    for car_name, alpha_long, stock_longitudinal, enhanced in (
+      ("TOYOTA_PRIUS_TSS2", False, False, True),
+      ("TOYOTA_PRIUS_TSS2", True, True, False),
+      ("TOYOTA_CHR_TSS2", False, False, False),
+      ("TOYOTA_CHR_TSS2", True, False, True),
+      ("TOYOTA_CHR_TSS2", True, True, False),
+      ("TOYOTA_RAV4_PRIME", True, False, False),
+    ):
+      fingerprint = gen_empty_fingerprint()
+
+      CarInterface = interfaces[car_name]
+      CP = CarInterface.get_params(car_name, fingerprint, [], alpha_long, False, False)
+      CP_SP = CarInterface.get_params_sp(CP, car_name, fingerprint, [], alpha_long, False, False)
+      self.assertFalse(CP_SP.flags & ToyotaFlagsSP.ENHANCED_BSM)
+
+      params = [{"ToyotaEnhancedBsm": "1"}]
+      if stock_longitudinal:
+        params.append({"ToyotaEnforceStockLongitudinal": "1"})
+      setup_interfaces(CarInterface, CP, CP_SP, params)
+      enhanced_on = bool(CP_SP.flags & ToyotaFlagsSP.ENHANCED_BSM)
+      self.assertEqual(enhanced_on, enhanced, f"{car_name=} {alpha_long=} {stock_longitudinal=}")
+
+  def test_has_bsm_enhanced_toyota_sdsu(self):
+    # TSS-P needs a smartDSU and openpilot longitudinal. 0x3F6 is status-only and is not required.
+    # LEXUS_RX is the 2016-19 RX, including the 2017 RX 450h. It uses the same smartDSU gate as RAV4H.
+    for car_name in ("TOYOTA_RAV4H", "LEXUS_RX"):
+      for alpha_long, smart_dsu, stock_longitudinal, enhanced in (
+        (True, True, False, True),
+        (True, False, False, False),
+        (False, True, False, False),
+        (True, True, True, False),
+      ):
+        fingerprint = gen_empty_fingerprint()
+        if smart_dsu:
+          fingerprint[0][0x2FF] = 8
+
+        CarInterface = interfaces[car_name]
+        CP = CarInterface.get_params(car_name, fingerprint, [], alpha_long, False, False)
+        CP_SP = CarInterface.get_params_sp(CP, car_name, fingerprint, [], alpha_long, False, False)
+        self.assertFalse(CP_SP.flags & ToyotaFlagsSP.ENHANCED_BSM)
+
+        params = [{"ToyotaEnhancedBsm": "1"}]
+        if stock_longitudinal:
+          params.append({"ToyotaEnforceStockLongitudinal": "1"})
+        setup_interfaces(CarInterface, CP, CP_SP, params)
+        enhanced_on = bool(CP_SP.flags & ToyotaFlagsSP.ENHANCED_BSM)
+        self.assertEqual(enhanced_on, enhanced, f"{car_name=} {alpha_long=} {smart_dsu=} {stock_longitudinal=}")
+        safety_on = bool(CP_SP.safetyParam & ToyotaSafetyFlagsSP.ENHANCED_BSM)
+        self.assertEqual(safety_on, enhanced, f"safety {car_name=} {enhanced=}")
+        if enhanced:
+          self.assertTrue(CP.openpilotLongitudinalControl)
